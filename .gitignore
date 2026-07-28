@@ -1,0 +1,46 @@
+# 依赖
+node_modules/
+.pnp
+.pnp.js
+
+# 构建产物
+dist/
+build/
+out/
+
+# 环境变量
+.npmrc
+.env
+.env.local
+.env.*.local
+
+# 数据库
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# 日志
+.run-logs/
+dev-server.log
+install-zod.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+npminstall-debug.log
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# TypeScript
+*.tsbuildinfo
+
+# TypeScript 编译残留
+server/*.js
+server/*.d.ts
+vite.config.js
+vite.config.d.ts
