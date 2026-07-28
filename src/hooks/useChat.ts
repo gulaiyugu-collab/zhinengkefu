@@ -146,6 +146,17 @@ export function useChat(options: UseChatOptions) {
         })
       });
 
+      if (!response.ok) {
+        let errorMessage = `请求失败 (${response.status})`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch {
+          // 保留默认错误信息
+        }
+        throw new Error(errorMessage);
+      }
+
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let fullContent = '';
@@ -307,6 +318,22 @@ export function useChat(options: UseChatOptions) {
                     sessionId: data.sessionId,
                     timestamp: data.timestamp
                   });
+                } else if (data.type === 'error') {
+                  const errorMessage = data.message || '发生错误，请重试';
+                  fullContent = errorMessage;
+                  setSessions(prev => prev.map(s => {
+                    if (s.id === realSessionId) {
+                      return {
+                        ...s,
+                        messages: s.messages.map(m =>
+                          m.id === realAssistantMessageId
+                            ? { ...m, content: errorMessage, isStreaming: false }
+                            : m
+                        )
+                      };
+                    }
+                    return s;
+                  }));
                 }
               } catch {
                 // 忽略解析错误
@@ -317,13 +344,14 @@ export function useChat(options: UseChatOptions) {
       }
     } catch (error) {
       console.error('Chat error:', error);
+      const errorMessage = error instanceof Error ? error.message : '发生错误，请重试';
       setSessions(prev => prev.map(s => {
         if (s.id === sessionId) {
           return {
             ...s,
             messages: s.messages.map(m => 
               m.id === tempAssistantMessageId 
-                ? { ...m, content: '发生错误，请重试', isStreaming: false }
+                ? { ...m, content: errorMessage, isStreaming: false }
                 : m
             )
           };

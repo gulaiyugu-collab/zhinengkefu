@@ -23,6 +23,7 @@ interface PendingPermission {
 }
 
 const pendingPermissions = new Map<string, PendingPermission>();
+const activeChatSessions = new Map<string, { startedAt: number; messagePreview: string }>();
 
 // 权限请求超时时间（5分钟）
 const PERMISSION_TIMEOUT = 5 * 60 * 1000;
@@ -393,6 +394,21 @@ app.post("/api/chat", async (req, res) => {
   }
 
   const selectedModel = model || session.model;
+
+  const activeChat = activeChatSessions.get(session.id);
+  if (activeChat) {
+    console.log(`[Chat] 会话仍在处理中，拒绝并发请求: ${session.id}`);
+    return res.status(409).json({
+      error: "当前会话仍在处理上一条消息，请等待回复完成或处理权限请求后再发送。",
+      startedAt: activeChat.startedAt,
+      messagePreview: activeChat.messagePreview,
+    });
+  }
+
+  activeChatSessions.set(session.id, {
+    startedAt: Date.now(),
+    messagePreview: message.slice(0, 100),
+  });
   
   // 获取 SDK session ID（用于恢复对话）
   const sdkSessionId = session.sdk_session_id;
@@ -415,6 +431,7 @@ app.post("/api/chat", async (req, res) => {
     console.log(`[Chat] 用户消息已保存: ${userMessageId}`);
   } catch (dbError: any) {
     console.error(`[Chat] 保存用户消息失败:`, dbError);
+    activeChatSessions.delete(session.id);
     return res.status(500).json({ error: "保存消息失败", detail: dbError?.message });
   }
 
@@ -439,6 +456,7 @@ app.post("/api/chat", async (req, res) => {
       content: "您当前已转接人工客服，请等待客服回复。如有其他问题，可直接在下方留言。" 
     })}\n\n`);
     res.write(`data: ${JSON.stringify({ type: "done", duration: 0, cost: 0 })}\n\n`);
+    activeChatSessions.delete(session.id);
     return res.end();
   }
 
@@ -514,7 +532,7 @@ app.post("/api/chat", async (req, res) => {
     // 如果有 sdk_session_id，使用 resume 恢复对话上下文
     // 注入客服 MCP 工具（search_faq / escalate_to_human / query_order）
     const csMcpServer = createCsMcpServer(session.id);
-    const stream = query({
+    const createChatStream = (resumeSessionId: string | null) => query({
       prompt: message,
       options: {
         cwd: workingDir,
@@ -526,7 +544,7 @@ app.post("/api/chat", async (req, res) => {
         mcpServers: {
           'cs-tools': csMcpServer,
         },
-        ...(sdkSessionId ? { resume: sdkSessionId } : {})  // 使用 resume 恢复对话
+        ...(resumeSessionId ? { resume: resumeSessionId } : {})  // 使用 resume 恢复对话
       }
     });
 
@@ -552,13 +570,19 @@ app.post("/api/chat", async (req, res) => {
 
     // 当前正在执行的工具 ID（用于匹配 tool_result）
     let currentToolId: string | null = null;
+    let currentResumeSessionId = sdkSessionId;
+    let retriedWithoutResume = false;
 
-    // 处理流式响应
-    for await (const msg of stream) {
-      console.log("[Stream] Message type:", msg.type, msg);
+    // 处理流式响应。若 SDK 端仍锁定旧 resume session，则自动新开 SDK 会话恢复服务。
+    while (true) {
+      const stream = createChatStream(currentResumeSessionId);
+
+      try {
+        for await (const msg of stream) {
+          console.log("[Stream] Message type:", msg.type, msg);
       
       // 处理 system 消息，获取 SDK 的 session_id
-      if (msg.type === "system" && (msg as any).subtype === "init") {
+          if (msg.type === "system" && (msg as any).subtype === "init") {
         newSdkSessionId = (msg as any).session_id;
         console.log(`[Stream] Got SDK session_id: ${newSdkSessionId}`);
         
@@ -567,7 +591,7 @@ app.post("/api/chat", async (req, res) => {
           db.updateSession(session.id, { sdk_session_id: newSdkSessionId });
           console.log(`[Stream] Saved SDK session_id to database`);
         }
-      } else if (msg.type === "assistant") {
+          } else if (msg.type === "assistant") {
         const content = msg.message.content;
 
         if (typeof content === "string") {
@@ -601,7 +625,7 @@ app.post("/api/chat", async (req, res) => {
             }
           }
         }
-      } else if ((msg as any).type === "tool_result") {
+          } else if ((msg as any).type === "tool_result") {
         // 处理工具结果（独立的消息类型）
         const msgAny = msg as any;
         const toolId = msgAny.tool_use_id || currentToolId;
@@ -627,7 +651,7 @@ app.post("/api/chat", async (req, res) => {
           })}\n\n`);
         }
         currentToolId = null;
-      } else if (msg.type === "result") {
+          } else if (msg.type === "result") {
         // 完成时确保所有工具都标记为完成
         toolCalls.forEach(tool => {
           if (tool.status === "running") {
@@ -641,6 +665,25 @@ app.post("/api/chat", async (req, res) => {
           duration: doneMsg.duration ?? doneMsg.duration_ms ?? 0,
           cost: doneMsg.cost ?? doneMsg.total_cost_usd ?? 0,
         })}\n\n`);
+          }
+        }
+        break;
+      } catch (streamError: any) {
+        const streamErrorMessage = streamError?.message || '';
+        const canRetryWithoutResume = Boolean(currentResumeSessionId)
+          && !retriedWithoutResume
+          && /^Session .+ is already in use$/i.test(streamErrorMessage)
+          && fullResponse.length === 0
+          && toolCalls.length === 0;
+
+        if (!canRetryWithoutResume) {
+          throw streamError;
+        }
+
+        console.warn(`[Chat] SDK session still in use, retrying without resume: ${currentResumeSessionId}`);
+        retriedWithoutResume = true;
+        currentResumeSessionId = null;
+        db.updateSession(session.id, { sdk_session_id: null });
       }
     }
 
@@ -677,6 +720,8 @@ app.post("/api/chat", async (req, res) => {
     const errorMessage = error?.message || "处理请求时发生错误";
     res.write(`data: ${JSON.stringify({ type: "error", message: errorMessage })}\n\n`);
     res.end();
+  } finally {
+    activeChatSessions.delete(session.id);
   }
 });
 

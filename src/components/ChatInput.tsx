@@ -70,6 +70,8 @@ export function ChatInput({
   const chatSenderRef = useRef<any>(null);
 
   const handleSend = useCallback((e: any) => {
+    if (isLoading) return;
+
     console.log('ChatSender send event:', e);
     const content = e?.detail?.message || e?.detail || e?.message || inputValue;
     if (content && typeof content === 'string' && content.trim() && selectedModel) {
@@ -77,7 +79,7 @@ export function ChatInput({
     } else if (inputValue.trim() && selectedModel) {
       onSend(inputValue.trim());
     }
-  }, [inputValue, selectedModel, onSend]);
+  }, [inputValue, selectedModel, isLoading, onSend]);
 
   const handleChange = useCallback((e: any) => {
     console.log('ChatSender change event:', e);
@@ -98,8 +100,8 @@ export function ChatInput({
         <ChatSender
           ref={chatSenderRef}
           value={inputValue}
-          placeholder="输入消息..."
-          disabled={!selectedModel}
+          placeholder={isLoading ? "等待上一条回复完成..." : "输入消息..."}
+          disabled={!selectedModel || isLoading}
           loading={isLoading}
           autosize={{ minRows: 1, maxRows: 6 }}
           actions={['send']}
